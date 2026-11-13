@@ -452,6 +452,11 @@ class Planner(ProfitUpgrade):
 
     # --- act -------------------------------------------------------------------------
     def run(self, img):
+        if getattr(self.bot, "new_location", False):   # new restaurant: new dishes
+            log.info("new location - starting a fresh dish database")
+            self.db, self.dp, self.seen = {}, {}, {}
+            self.waiting_red, self.scanned_at = None, 0.0
+            self.bot.new_location = False
         if not self.db or time.time() - self.scanned_at > self.cfg.get("rescan_seconds", 90):
             self.scan()
             return True
@@ -567,6 +572,8 @@ class ManageEatery(Task):
         bx, by = self.cfg.get("button_pos", [0.88, 0.96])
         # only open when the button shows its red '!' (= something is affordable)
         dot = self.cfg.get("badge_region", [0.78, 0.91, 0.85, 0.96])
+        if not self.bot.eatery_button_visible(img):
+            return False                          # menu hidden (e.g. ad banner on top)
         if self.cfg.get("only_when_badged", True) and vision.red_fraction(img, dot) < 0.05:
             return False
         log.info("opening Manage Eatery")

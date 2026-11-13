@@ -65,7 +65,16 @@ class Device:
         r = self._run("shell", "dumpsys window | grep mCurrentFocus")
         return r.stdout.decode(errors="ignore")
 
-    # NOTE: no Back key on purpose - in Frog's Kitchen it opens the 'Quit Game' dialog.
+    def back_out_of_ad(self) -> bool:
+        """Android Back, ONLY while an ad window is in front (checked right here), to close
+        the full-screen ads the game shows between locations. Never touches the ad itself.
+        In the game itself Back opens 'Quit Game', so it is never sent there."""
+        if "AdActivity" not in self.focus():
+            return False
+        self._run("shell", "input", "keyevent", "4")
+        return True
+
+    # NOTE: no plain Back key - in Frog's Kitchen it opens the 'Quit Game' dialog.
 
     def swipe(self, x1, y1, x2, y2, ms=450):
         self._run("shell", "input", "swipe", *(str(int(v)) for v in (x1, y1, x2, y2, ms)))

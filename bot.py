@@ -23,6 +23,29 @@ ROOT = Path(__file__).parent
 log = logging.getLogger("frogbot")
 
 
+def _mem_mb():
+    """This process's private memory in MB (Windows), to spot memory growth early."""
+    try:
+        import ctypes
+
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong)] + \
+                       [(n, ctypes.c_size_t) for n in (
+                           "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                           "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                           "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
+                           "PrivateUsage")]
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(pmc)
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        ctypes.windll.psapi.GetProcessMemoryInfo(ctypes.c_void_p(k32.GetCurrentProcess()),
+                                                 ctypes.byref(pmc), pmc.cb)
+        return int(pmc.PrivateUsage / 1048576)
+    except Exception:
+        return -1
+
+
 class Bot:
     def __init__(self, cfg, dry_run=False, debug=False):
         from device import Device
@@ -87,8 +110,10 @@ class Bot:
                         video_noted = True
                         log.info("video-ad banner showing - not touching it  %s", b["texts"])
                         self._save_banner(img, False)
-            except Exception as e:  # never let the watcher die
-                log.debug("banner watcher: %s", e)
+            except Exception as e:  # any error here stops the whole bot (main loop checks)
+                log.debug("banner watcher error", exc_info=True)
+                self.fatal = e
+                return
             time.sleep(self.cfg.get("banner_poll", 0.3))
 
     def _claim_free(self, img, x, y, why):
@@ -115,10 +140,16 @@ class Bot:
         if img is None:
             return False
         H, W = img.shape[:2]
-        # the ONE exception: the Manage Eatery button may be pressed even with its '!'
+        # the ONE exception: the Manage Eatery button may be pressed even with its '!' -
+        # but ONLY if the real green arrow button is visible there (an ad banner can cover
+        # the bottom menu, with a 'Play now' button in the same spot)
         for ax, ay, ar in self.cfg.get("allow_tap_points", []):
             if ((x / W - ax) ** 2 + (y / H - ay) ** 2) ** 0.5 <= ar:
-                return True
+                if self.eatery_button_visible(self.dev.screenshot_raw()):
+                    return True
+                log.warning("refused tap at (%d,%d): Manage Eatery button not visible "
+                            "(ad banner over the menu?)", x, y)
+                return False
         # an ad is in front: never touch anything (you close ads yourself)
         if self.ad_showing():
             log.warning("refused tap at (%d,%d): an AD is on screen", x, y)
@@ -132,7 +163,8 @@ class Bot:
                 if vision.banner_gold(fresh) >= self.cfg.get("banner_guard_gold", 0.20):
                     log.warning("refused tap at (%d,%d): reward banner area (not verified FREE)", x, y)
                     return False
-        if any(x1 <= x / W <= x2 and y1 <= y / H <= y2 for x1, y1, x2, y2 in self.ignore_taps):
+        if not getattr(self, "x_ok", False) and \
+                any(x1 <= x / W <= x2 and y1 <= y / H <= y2 for x1, y1, x2, y2 in self.ignore_taps):
             log.warning("refused tap at (%d,%d): inside a no-touch HUD region", x, y)
             return False
         if self._alerts is None:
@@ -151,6 +183,24 @@ class Bot:
             self._focus_t = now
             self._ad = "AdActivity" in self.dev.focus()
         return self._ad
+
+    def handle_ad(self):
+        """Full-screen ad in front: no taps at all; press Back every few seconds until the
+        ad lets go (many only allow closing after a countdown)."""
+        if getattr(self, "_ad_since", None) is None:
+            self._ad_since = time.time()
+            log.warning("FULL-SCREEN AD - pressing Back until it closes (no taps on the ad)")
+        if not self.cfg.get("close_ads_with_back", True):
+            time.sleep(3)
+            return
+        time.sleep(self.cfg.get("ad_back_every", 4))
+        if self.dev.back_out_of_ad():
+            log.info("  Back pressed (ad open %ds)", time.time() - self._ad_since)
+        time.sleep(1.5)
+        self._focus_t = 0                       # re-check the window right away
+        if not self.ad_showing():
+            log.info("  ad closed after %ds", time.time() - self._ad_since)
+            self._ad_since = None
 
     def tap(self, x, y, times=1):
         if not self.safe_to_tap(x, y):
@@ -259,21 +309,88 @@ class Bot:
         self.wait(0.5)
         return True
 
+    def eatery_button_visible(self, img) -> bool:
+        H, W = img.shape[:2]
+        if not hasattr(self, "_eat_tpl"):
+            self._eat_tpl = cv2.imread(str(ROOT / "templates" / "eatery_button" / "eatery_button.png"))
+        region = img[int(0.87 * H):, int(0.72 * W):]
+        return cv2.matchTemplate(region, self._eat_tpl, cv2.TM_CCOEFF_NORMED).max() >= 0.8
+
+    def level_complete(self, img) -> bool:
+        """'Well Done!' screen at the end of a location -> press 'To the next location!'.
+        Everything else in the bot is generic, so the same strategy continues there; the
+        planner forgets the old dishes (new_location flag)."""
+        hits = {d.kind: d for d in vision.match_templates(img, ROOT / "templates" / "levelup", 0.8)}
+        if not hits:
+            # the map button has a moving shine that lowers the template score on most
+            # frames: a weaker match is confirmed by reading the text there
+            for d in vision.match_templates(img, ROOT / "templates" / "levelup", 0.5):
+                if not d.kind.startswith("next_location"):
+                    continue
+                crop = img[max(0, d.y - 15):d.y + d.h + 15, max(0, d.x - 30):d.x + d.w + 30]
+                res, _ = ocr.engine()(crop)
+                if any("nextlocation" in r[1].replace(" ", "").lower() for r in res or []):
+                    hits[d.kind] = d
+                    break
+        for kind in ("next_location", "next_location_map"):   # 'Well Done!' and world map
+            if kind in hits:
+                b = hits[kind]
+                log.info("LOCATION COMPLETE -> pressing 'To the next location!' (%s)", kind)
+                if self.tap(b.cx, b.cy + (20 if kind == "next_location_map" else 0)):
+                    self.new_location = True
+                    time.sleep(self.cfg.get("location_load_wait", 5))
+                return True
+        if "ready_set_go" in hits:           # 'Grand Opening!' of the new location
+            b = hits["ready_set_go"]
+            log.info("GRAND OPENING -> pressing 'Ready! Set! Go!'")
+            if self.tap(b.cx, b.cy):
+                self.new_location = True
+                time.sleep(3)
+            return True
+        if "tap_to_skip" in hits:            # reward animation: tap the middle, far from ads
+            H, W = img.shape[:2]
+            log.info("reward animation -> tap to skip")
+            self.tap(W / 2, H / 2)
+            time.sleep(2)
+            return True
+        if "well_done" in hits:              # button still animating in
+            time.sleep(1)
+            return True
+        return False
+
     def clear_overlays(self, img) -> bool:
         """Leftover windows must be closed before the bot looks at the restaurant, or it
         mistakes their contents for dishes/coins (e.g. a Manage Eatery list left open)."""
         if self.guard(img):
             return True
+        if self.level_complete(img):
+            return True
         if self.eatery_title(img) is not None:
             log.info("Manage Eatery window is open - closing it")
             self.close_with_x()
+            return True
+        # any other popup with an orange X (Starter Pack / real-money offers, 'Rate Us!',
+        # news ...): close it with the X and never press anything else on it
+        x = vision.find_close_button(img)
+        if x is not None:
+            log.info("popup window -> closing it with its X")
+            self.x_ok = True        # a verified X sits ON TOP of the HUD icons: allow it
+            try:
+                self.tap(x.cx, x.cy)
+            finally:
+                self.x_ok = False
+            time.sleep(0.8)
             return True
         return self.close_stale_popup(img)
 
     def close_with_x(self):
         x = vision.find_close_button(self.screenshot())
         if x:
-            self.tap(x.cx, x.cy)
+            self.x_ok = True
+            try:
+                self.tap(x.cx, x.cy)
+            finally:
+                self.x_ok = False
             self.wait(0.5)
 
     # --- main loop --------------------------------------------------------
@@ -288,22 +405,21 @@ class Bot:
         start, first_bar, last_report = time.time(), None, 0.0
         while True:
             try:
+                if getattr(self, "fatal", None) is not None:   # error in the banner watcher
+                    raise self.fatal
                 img = self.screenshot()
                 if time.time() - last_report >= self.cfg.get("report_seconds", 60):
                     bar = vision.level_bar(img)
                     first_bar = bar if first_bar is None else first_bar
                     mins = (time.time() - start) / 60
                     rate = (bar - first_bar) / mins if mins > 0.5 else 0
-                    log.info("LEVEL BAR %.1f%%  (+%.1f%% in %.0f min, %.2f%%/min)",
-                             bar * 100, (bar - first_bar) * 100, mins, rate * 100)
+                    log.info("LEVEL BAR %.1f%%  (+%.1f%% in %.0f min, %.2f%%/min)  bot memory %d MB",
+                             bar * 100, (bar - first_bar) * 100, mins, rate * 100, _mem_mb())
                     last_report = time.time()
                 if self.ad_showing():
-                    if not getattr(self, "_ad_logged", False):
-                        log.warning("AN AD IS ON SCREEN - bot paused until you close it")
-                        self._ad_logged = True
-                    time.sleep(3)
+                    self.handle_ad()
                     continue
-                self._ad_logged = False
+                self._ad_since = None
                 if self.clear_overlays(img):
                     continue
                 if self.debug and n % 10 == 0:
@@ -318,13 +434,16 @@ class Bot:
             except KeyboardInterrupt:
                 log.info("stopped")
                 return
-            except Exception as e:  # emulator hiccup: reconnect and keep going
-                log.warning("error: %s -- reconnecting in 3s", e)
-                time.sleep(3)
-                try:
-                    self.dev.connect()
-                except Exception as e2:
-                    log.warning("reconnect failed: %s", e2)
+            except Exception as e:  # ANY error: stop the bot (no retrying)
+                msg = str(e)
+                log.debug("error details", exc_info=True)       # full traceback -> frogbot.log
+                if isinstance(e, MemoryError) or "allocation" in msg or "paging file" in msg:
+                    log.error("STOPPED: the PC ran out of memory (bot used %d MB). "
+                              "Close other programs and start bot.py again.", _mem_mb())
+                else:
+                    last = msg.strip().splitlines()[-1][:200] if msg.strip() else type(e).__name__
+                    log.error("STOPPED because of an error: %s (details in frogbot.log)", last)
+                raise SystemExit(1)
 
     def _save_debug(self, img, n):
         dets = detect_all(img, self.ignore)

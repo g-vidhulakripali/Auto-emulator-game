@@ -7,35 +7,61 @@ Popup layout (relative to the 'Level' title):
     (coin) 152.27e   (clock) 1.9s     <- profit per dish, cooking time
     [ (coin) 20.97e ]                 <- cost of the next level
 """
+import gc
 import re
 import threading
 
 _engine = None
 AMOUNT = re.compile(r"^(\d+(?:\.\d+)?)([a-z]{0,2})$")
-MONEY = re.compile(r"^\d{1,3}(?:\.\d{1,2})?[a-z]{1,2}$")   # in-game money always has a suffix
+# in-game money: '12.34e' later on, plain '159' at the start of a new location
+MONEY = re.compile(r"^\d{1,4}(?:\.\d{1,2})?[a-z]{0,2}$")
 TIME = re.compile(r"^\d{1,3}(?:\.\d)?s$")
 
 
 _lock = threading.Lock()
 
 
-class _Locked:
-    """The OCR engine is shared by the main loop and the banner watcher thread."""
+REBUILD_EVERY = 300   # OCR reads before the engine is rebuilt (frees memory it piled up)
 
-    def __init__(self, eng):
-        self.eng = eng
+
+def _make_engine():
+    from rapidocr_onnxruntime import RapidOCR
+    from rapidocr_onnxruntime.utils import infer_engine as ie
+    if not getattr(ie.OrtInferSession, "_frogbot_patched", False):
+        orig = ie.OrtInferSession._init_sess_opts
+
+        def opts(config):
+            o = orig(config)
+            o.enable_mem_pattern = False      # no per-input-size memory plans (they pile up)
+            return o
+
+        ie.OrtInferSession._init_sess_opts = staticmethod(opts)
+        ie.OrtInferSession._frogbot_patched = True
+    return RapidOCR()
+
+
+class _Locked:
+    """The OCR engine is shared by the main loop and the banner watcher thread.
+    It is rebuilt every REBUILD_EVERY reads so its memory cannot pile up."""
+
+    def __init__(self):
+        self.eng, self.calls = _make_engine(), 0
 
     def __call__(self, img):
         with _lock:
-            return self.eng(img)
+            self.calls += 1
+            if self.calls >= REBUILD_EVERY:
+                self.eng, self.calls = None, 0
+                gc.collect()
+                self.eng = _make_engine()
+            return self.eng(img)                 # errors propagate: the bot stops
 
 
 def engine():
     global _engine
     with _lock:
         if _engine is None:
-            from rapidocr_onnxruntime import RapidOCR
-            _engine = _Locked(RapidOCR())
+            _engine = _Locked()
     return _engine
 
 
@@ -140,6 +166,8 @@ def read_popup(img, title):
     profit, cost = parse_amount(profit_t[0]), parse_amount(cost_t[0])
     seconds = float(time_t[0][:-1])
     if not profit or not cost or seconds <= 0:
+        return None
+    if not (1e-3 <= cost / profit <= 1e6):   # misread (e.g. a dropped suffix): ignore
         return None
     return {"name": name, "level": level, "profit": profit, "seconds": seconds, "cost": cost,
             "text": f"{profit_t[0]}/{time_t[0]} for {cost_t[0]}"}
