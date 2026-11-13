@@ -8,6 +8,7 @@ Popup layout (relative to the 'Level' title):
     [ (coin) 20.97e ]                 <- cost of the next level
 """
 import re
+import threading
 
 _engine = None
 AMOUNT = re.compile(r"^(\d+(?:\.\d+)?)([a-z]{0,2})$")
@@ -15,11 +16,26 @@ MONEY = re.compile(r"^\d{1,3}(?:\.\d{1,2})?[a-z]{1,2}$")   # in-game money alway
 TIME = re.compile(r"^\d{1,3}(?:\.\d)?s$")
 
 
+_lock = threading.Lock()
+
+
+class _Locked:
+    """The OCR engine is shared by the main loop and the banner watcher thread."""
+
+    def __init__(self, eng):
+        self.eng = eng
+
+    def __call__(self, img):
+        with _lock:
+            return self.eng(img)
+
+
 def engine():
     global _engine
-    if _engine is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _engine = RapidOCR()
+    with _lock:
+        if _engine is None:
+            from rapidocr_onnxruntime import RapidOCR
+            _engine = _Locked(RapidOCR())
     return _engine
 
 
@@ -48,6 +64,36 @@ def read_amount(img, region):
         if v:
             return v
     return None
+
+
+def read_banner(img, strip):
+    """Read the timed reward banner in `strip` (normalised x1, y1, x2, y2).
+    Returns None if there is no banner (no '+amount' text), else
+    {'free': True only if the word FREE is printed on it, 'tap': (x, y) of its amount}.
+    Video-ad banners carry no FREE word -> free=False -> never tapped."""
+    H, W = img.shape[:2]
+    x1, y1 = int(strip[0] * W), int(strip[1] * H)
+    crop = img[y1:int(strip[3] * H), x1:int(strip[2] * W)]
+    res, _ = engine()(crop)
+    amount, free, texts = None, False, []
+    for r in res or []:
+        t = r[1].replace(" ", "")
+        texts.append(t)
+        if "FREE" in t.upper():
+            free = True
+        if t.startswith("+") and parse_amount(t[1:]):
+            cx = (r[0][0][0] + r[0][2][0]) / 2 + x1
+            cy = (r[0][0][1] + r[0][2][1]) / 2 + y1
+            amount = (cx, cy)
+    if amount is None:
+        return None
+    if not free:  # second look at 2x zoom: the small 'FREE' word is easy to miss
+        import cv2
+        big = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        res2, _ = engine()(big)
+        texts += [r[1] for r in res2 or []]
+        free = any("FREE" in r[1].upper().replace(" ", "") for r in res2 or [])
+    return {"free": free, "tap": amount, "texts": texts}
 
 
 def read_popup(img, title):

@@ -7,12 +7,15 @@
 """
 import argparse
 import logging
+import sys
+import threading
 import time
 from pathlib import Path
 
 import cv2
 import yaml
 
+import ocr
 import vision
 from tasks import TASKS
 
@@ -29,6 +32,8 @@ class Bot:
         # taps are blocked in the HUD except where the bot needs a specific menu button
         self.ignore_taps = [tuple(r) for r in cfg.get("no_tap_regions", [])]
         self.last_img, self._alerts = None, None
+        self.banner_block, self.free_ok = None, False
+        self.tap_lock = threading.Lock()
         self.dev = Device(cfg["adb_path"], cfg["serials"])
         self.task_by_name = {name: TASKS[name](self, tcfg) for name, tcfg in cfg["tasks"].items()
                              if tcfg.get("enabled", True)}
@@ -42,6 +47,68 @@ class Bot:
         self.last_img, self._alerts = img, None
         return img
 
+    # --- FREE banner watcher (background thread) -----------------------------------
+    def start_banner_watch(self):
+        """FREE banners last only a moment, so a separate thread watches the banner strip
+        ~3x a second regardless of what the main loop is doing."""
+        self._free_tpl = cv2.imread(str(ROOT / "templates" / "free" / "free_word.png"))
+        threading.Thread(target=self._watch_banners, daemon=True).start()
+
+    def _watch_banners(self):
+        H = W = None
+        x1, y1, x2, y2 = vision.BANNER_STRIP
+        video_noted = False
+        while True:
+            try:
+                img = self.dev.screenshot_raw()
+                H, W = img.shape[:2]
+                if vision.banner_gold(img) < self.cfg.get("banner_guard_gold", 0.20):
+                    self.banner_block, video_noted = None, False
+                    time.sleep(self.cfg.get("banner_poll", 0.3))
+                    continue
+                self.banner_block = vision.BANNER_STRIP      # hands off until proven FREE
+                oy, ox = int(y1 * H) - 40, int(x1 * W) - 40
+                strip = img[oy:int(y2 * H) + 40, ox:]
+                # fast path: picture of the word FREE (~7 ms). Video banners score <= 0.4
+                r = cv2.matchTemplate(strip, self._free_tpl, cv2.TM_CCOEFF_NORMED)
+                _, score, _, loc = cv2.minMaxLoc(r)
+                th, tw = self._free_tpl.shape[:2]
+                if score >= self.cfg.get("free_match", 0.75):
+                    self._claim_free(img, ox + loc[0] + tw // 2, oy + loc[1] + th // 2,
+                                     f"template {score:.2f}")
+                    continue
+                # backup: OCR once per banner (if FREE is drawn slightly differently)
+                if not video_noted and vision.banner_gold(img) >= self.cfg.get("banner_gold_min", 0.28):
+                    b = ocr.read_banner(img, vision.BANNER_STRIP)
+                    if b and b["free"]:
+                        self._claim_free(img, *b["tap"], f"ocr {b['texts']}")
+                        continue
+                    if b:
+                        video_noted = True
+                        log.info("video-ad banner showing - not touching it  %s", b["texts"])
+                        self._save_banner(img, False)
+            except Exception as e:  # never let the watcher die
+                log.debug("banner watcher: %s", e)
+            time.sleep(self.cfg.get("banner_poll", 0.3))
+
+    def _claim_free(self, img, x, y, why):
+        if self.ad_showing():
+            return
+        log.info("FREE banner -> claiming it (%s)", why)
+        self._save_banner(img, True)
+        with self.tap_lock:
+            self.dev.tap(x, y)
+        self.banner_block = None
+        time.sleep(1.0)
+
+    def _save_banner(self, img, free):
+        H, W = img.shape[:2]
+        x1, y1, x2, y2 = vision.BANNER_STRIP
+        out = ROOT / "screenshots" / "banners"
+        out.mkdir(parents=True, exist_ok=True)
+        name = f"{time.strftime('%H%M%S')}_{'FREE' if free else 'video'}.png"
+        cv2.imwrite(str(out / name), img[int(y1 * H) - 30:int(y2 * H) + 30, int(x1 * W) - 40:])
+
     def safe_to_tap(self, x, y) -> bool:
         """RULE: never tap a red/orange '!' badge or the HUD (ignore_regions)."""
         img = self.last_img
@@ -52,6 +119,19 @@ class Bot:
         for ax, ay, ar in self.cfg.get("allow_tap_points", []):
             if ((x / W - ax) ** 2 + (y / H - ay) ** 2) ** 0.5 <= ar:
                 return True
+        # an ad is in front: never touch anything (you close ads yourself)
+        if self.ad_showing():
+            log.warning("refused tap at (%d,%d): an AD is on screen", x, y)
+            return False
+        # banner strip (right edge): a FRESH look before every tap there. Anything gold
+        # sliding in = refuse, unless FreeBanner has just read the word FREE on it.
+        sx1, sy1, sx2, sy2 = vision.BANNER_STRIP
+        if sx1 - 0.02 <= x / W <= sx2 and sy1 - 0.02 <= y / H <= sy2 + 0.02:
+            if not getattr(self, "free_ok", False):
+                fresh = self.dev.screenshot_raw()
+                if vision.banner_gold(fresh) >= self.cfg.get("banner_guard_gold", 0.20):
+                    log.warning("refused tap at (%d,%d): reward banner area (not verified FREE)", x, y)
+                    return False
         if any(x1 <= x / W <= x2 and y1 <= y / H <= y2 for x1, y1, x2, y2 in self.ignore_taps):
             log.warning("refused tap at (%d,%d): inside a no-touch HUD region", x, y)
             return False
@@ -64,16 +144,30 @@ class Bot:
                 return False
         return True
 
+    def ad_showing(self) -> bool:
+        """Checks (at most every 2 s) whether Android shows an ad window in front."""
+        now = time.time()
+        if now - getattr(self, "_focus_t", 0) > 2:
+            self._focus_t = now
+            self._ad = "AdActivity" in self.dev.focus()
+        return self._ad
+
     def tap(self, x, y, times=1):
         if not self.safe_to_tap(x, y):
             return False
+        callers, fr = [], sys._getframe(1)
+        while fr is not None and len(callers) < 2:
+            callers.append(fr.f_code.co_name)
+            fr = fr.f_back
+        log.debug("tap (%d,%d) x%d  from %s", x, y, times, " <- ".join(callers))
         if self.dry_run:
             log.debug("[dry-run] tap %d,%d x%d", x, y, times)
             return True
-        if times == 1:
-            self.dev.tap(x, y)
-        else:
-            self.dev.tap_many([(x, y)] * times)
+        with self.tap_lock:
+            if times == 1:
+                self.dev.tap(x, y)
+            else:
+                self.dev.tap_many([(x, y)] * times)
         time.sleep(self.cfg.get("tap_delay", 0.05))
         return True
 
@@ -165,6 +259,17 @@ class Bot:
         self.wait(0.5)
         return True
 
+    def clear_overlays(self, img) -> bool:
+        """Leftover windows must be closed before the bot looks at the restaurant, or it
+        mistakes their contents for dishes/coins (e.g. a Manage Eatery list left open)."""
+        if self.guard(img):
+            return True
+        if self.eatery_title(img) is not None:
+            log.info("Manage Eatery window is open - closing it")
+            self.close_with_x()
+            return True
+        return self.close_stale_popup(img)
+
     def close_with_x(self):
         x = vision.find_close_button(self.screenshot())
         if x:
@@ -175,6 +280,9 @@ class Bot:
     def run(self):
         log.info("connected to %s", self.dev.connect())
         log.info("tasks: %s", [type(t).__name__ for t in self.tasks])
+        if not self.dry_run:
+            self.start_banner_watch()
+            log.info("FREE-banner watcher running in the background")
         interval = self.cfg.get("loop_interval", 0.5)
         n = 0
         start, first_bar, last_report = time.time(), None, 0.0
@@ -189,7 +297,14 @@ class Bot:
                     log.info("LEVEL BAR %.1f%%  (+%.1f%% in %.0f min, %.2f%%/min)",
                              bar * 100, (bar - first_bar) * 100, mins, rate * 100)
                     last_report = time.time()
-                if self.guard(img) or self.close_stale_popup(img):
+                if self.ad_showing():
+                    if not getattr(self, "_ad_logged", False):
+                        log.warning("AN AD IS ON SCREEN - bot paused until you close it")
+                        self._ad_logged = True
+                    time.sleep(3)
+                    continue
+                self._ad_logged = False
+                if self.clear_overlays(img):
                     continue
                 if self.debug and n % 10 == 0:
                     self._save_debug(img, n)
@@ -233,7 +348,11 @@ def main():
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--image", help="run detectors on a saved screenshot and exit")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if args.debug else logging.INFO)
+    logfile = logging.FileHandler(ROOT / "frogbot.log", encoding="utf-8")  # every tap + reason
+    logfile.setLevel(logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG, handlers=[console, logfile],
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
 

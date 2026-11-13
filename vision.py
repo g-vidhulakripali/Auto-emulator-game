@@ -284,6 +284,17 @@ def level_bar(img):
     return float(orange.mean())
 
 
+BANNER_STRIP = (0.62, 0.57, 1.0, 0.70)   # where timed reward banners slide in (right edge)
+
+
+def banner_gold(img):
+    """Share of gold pixels in the banner strip. ~0.35 when a reward banner is showing."""
+    H, W = img.shape[:2]
+    x1, y1, x2, y2 = BANNER_STRIP
+    hsv = cv2.cvtColor(img[int(y1 * H):int(y2 * H), int(x1 * W):int(x2 * W)], cv2.COLOR_BGR2HSV)
+    return float((_hsv_mask(hsv, [((8, 110, 180), (30, 255, 255))]) > 0).mean())
+
+
 def find_template(img, folder, threshold=0.8):
     """First match of any template in folder, or None (used to recognise screens)."""
     hits = match_templates(img, folder, threshold)

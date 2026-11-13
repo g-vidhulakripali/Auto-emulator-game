@@ -60,6 +60,11 @@ class Device:
         cmd = "; ".join(f"input tap {int(x)} {int(y)}" for x, y in points)
         self._run("shell", cmd)
 
+    def focus(self) -> str:
+        """Name of the window in front (e.g. '...UnityPlayerActivity' or '...AdActivity')."""
+        r = self._run("shell", "dumpsys window | grep mCurrentFocus")
+        return r.stdout.decode(errors="ignore")
+
     # NOTE: no Back key on purpose - in Frog's Kitchen it opens the 'Quit Game' dialog.
 
     def swipe(self, x1, y1, x2, y2, ms=450):

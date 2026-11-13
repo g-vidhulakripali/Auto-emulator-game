@@ -313,6 +313,10 @@ class Planner(ProfitUpgrade):
         return (y0 - (loc[1] + top)) * a.shape[0] / sh
 
     def _quick(self, img):
+        for _ in range(3):                         # leftover windows first
+            if not self.bot.clear_overlays(img):
+                break
+            img = self.bot.screenshot()
         for name in self.cfg.get("quick_tasks", ["manage_eatery", "tap_egg", "unlock_new", "collect_coins"]):
             t = self.bot.task_by_name.get(name)
             if t and t.run(img):
@@ -522,6 +526,39 @@ class Planner(ProfitUpgrade):
         return True
 
 
+class FreeBanner(Task):
+    """Timed reward banner sliding in from the right.
+    'FREE +670f'      -> tap it (top priority).
+    video icon '+6g'  -> NEVER tap: its area becomes a no-touch zone while it is showing."""
+
+    def run(self, img):
+        if vision.banner_gold(img) < self.cfg.get("gold_min", 0.28):
+            self.bot.banner_block = None
+            return False
+        b = ocr.read_banner(img, vision.BANNER_STRIP)
+        if b is None:
+            self.bot.banner_block = None
+            return False
+        if not b["free"]:
+            if self.bot.banner_block is None:
+                log.info("video-ad banner showing - not touching it")
+            self.bot.banner_block = vision.BANNER_STRIP
+            return False
+        # re-check on a fresh frame right before tapping: still there, still FREE
+        fresh = self.bot.screenshot()
+        b2 = ocr.read_banner(fresh, vision.BANNER_STRIP)
+        if not b2 or not b2["free"]:
+            return False
+        log.info("FREE banner -> claiming it")
+        self.bot.free_ok = True
+        try:
+            self.bot.tap(*b2["tap"])
+        finally:
+            self.bot.free_ok = False
+        self.bot.wait(0.8)
+        return True
+
+
 class ManageEatery(Task):
     """Green up-arrow button (bottom right) -> Manage Eatery list -> buy every green button."""
 
@@ -545,7 +582,10 @@ class ManageEatery(Task):
         bought = self.bot.buy_until_grey(self.cfg.get("max_buys", 15), min_w=0.12,
                                          screen_ok=ok, below_y=title.y + title.h)
         log.info("  bought %d eatery upgrade(s)", bought)
-        self.bot.close_with_x()
+        for _ in range(3):                         # make sure the window really closed
+            self.bot.close_with_x()
+            if self.bot.eatery_title(self.bot.screenshot()) is None:
+                break
         return True
 
 
@@ -596,6 +636,7 @@ TASKS = {
     "upgrade_items": UpgradeItems,
     "smart_upgrade": ProfitUpgrade,
     "planner": Planner,
+    "free_banner": FreeBanner,
     "manage_eatery": ManageEatery,
     "collect_coins": CollectCoins,
     "tap_templates": TapTemplates,

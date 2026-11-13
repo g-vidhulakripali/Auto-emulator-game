@@ -14,6 +14,10 @@ buy_burst: 3            # presses of a buy button per screenshot check (faster l
 tasks:
   # order = priority within each cycle (your list):
   #   1 green arrow (Manage Eatery)  2 NEW + frog egg  3 red arrows  4 orange (evaluated)
+  free_banner:          # (replaced by the background FREE-banner watcher in bot.py, which
+    enabled: false      #  checks ~3x/second with a 'FREE' word template + OCR backup)
+    every_seconds: 1
+    gold_min: 0.28
   manage_eatery:        # 1: green up-arrow button bottom-right (the one allowed '!') ->
     enabled: true       # eatery multipliers (x10 price, faster cooking, +workers)
     every_seconds: 3          # how often to check the button for its red '!'
@@ -39,7 +43,7 @@ tasks:
     every_seconds: 1    # payback); no red at all -> best orange. Scrolls there, buys, repeats.
     rescan_seconds: 90
     max_views: 8
-    quick_tasks: [manage_eatery, tap_egg, unlock_new, collect_coins]  # done on every view
+    quick_tasks: [free_banner, manage_eatery, tap_egg, unlock_new, collect_coins]  # every view
     tap_offset: [1.2, 1.3]
     popup_wait: 0.5
     max_clicks: 45
