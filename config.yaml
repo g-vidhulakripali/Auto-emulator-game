@@ -1,0 +1,83 @@
+# Frog's Kitchen bot settings. Positions are fractions of the screen (0..1).
+
+adb_path: E:/LDPlayer/LDPlayer9/adb.exe
+serials: ["emulator-5554", "127.0.0.1:5555"]
+
+loop_interval: 0.3      # seconds between cycles
+tap_delay: 0.05
+buy_delay: 0.25
+buy_burst: 3            # presses of a buy button per screenshot check (faster levelling)
+# Safety (built in): only green buttons with a gold COIN icon are ever pressed, the
+# Back key is never used, a 'Quit Game' dialog is always closed with its X, and any
+# tap near a red/orange '!' badge or inside no_tap_regions is refused.
+
+tasks:
+  # order = priority within each cycle
+  unlock_new:           # item with a NEW sticker -> open it -> press green unlock button
+    enabled: true
+    every_seconds: 3
+    max_per_cycle: 2
+    max_clicks: 3
+    popup_wait: 0.8
+  upgrade_items:       # red badge with up arrow on a food -> open it -> buy levels
+    enabled: true
+    every_seconds: 2
+    max_per_cycle: 4
+    max_clicks_per_item: 12
+    popup_wait: 0.5
+    tap_offset: [1.2, 1.3]   # item centre relative to badge (in badge sizes)
+  tap_egg:              # white/teal frog egg wandering around -> tap to burst it for coins
+    enabled: true
+    every_seconds: 1
+    dir: templates/egg
+    threshold: 0.75
+  manage_eatery:        # green up-arrow button bottom-right -> buy eatery upgrades
+    enabled: true
+    every_seconds: 5          # how often to check the button for its red '!'
+    only_when_badged: true
+    badge_region: [0.78, 0.91, 0.85, 0.96]
+    button_pos: [0.88, 0.96]
+    popup_wait: 0.8
+    max_buys: 15
+  collect_coins:        # big gold coins on the dining tables -> tap for extra money
+    enabled: true
+    every_seconds: 1
+    max_taps: 10
+  tap_templates:        # optional: drop cropped PNGs (e.g. order bubbles) into templates/tap
+    enabled: false
+    every_seconds: 1
+    dir: templates/tap
+    threshold: 0.85
+  scroll:               # pan through the restaurant (keep last)
+    enabled: true
+    every_seconds: 3    # time spent on each view before moving on
+    step: 0.45          # drag length, fraction of screen height (top->bottom in ~3 views)
+    x: 0.5
+    y: 0.5
+
+scroll:                 # drag tuning shared by restaurant + Manage Eatery list
+  swipe_ms: 400         # slow drag = no fling
+  settle: 0.45
+  same_threshold: 6.0   # mean pixel diff below this = view did not move (end reached)
+
+# Areas the bot must never act on: x1, y1, x2, y2
+ignore_regions:
+  - [0.00, 0.00, 0.31, 0.085]  # coin counter + income %
+  - [0.31, 0.00, 0.61, 0.06]   # gems + buy-gems button
+  - [0.78, 0.00, 1.00, 0.065]  # calendar + settings
+  - [0.00, 0.085, 0.18, 0.28]  # left: starter pack, ad TV, gem frog
+  - [0.84, 0.085, 1.00, 0.27]  # right: event / pass icons
+  - [0.00, 0.82, 0.21, 0.90]   # discount (%) button
+  - [0.83, 0.85, 1.00, 0.93]   # rocket boost
+  - [0.00, 0.89, 1.00, 1.00]   # bottom menu bar
+
+# Hard tap block: every HUD button EXCEPT the Manage Eatery button (bottom right).
+no_tap_regions:
+  - [0.00, 0.00, 0.31, 0.085]  # coin counter + income %
+  - [0.31, 0.00, 0.61, 0.06]   # gems + buy-gems button
+  - [0.78, 0.00, 1.00, 0.065]  # calendar + settings
+  - [0.00, 0.085, 0.18, 0.28]  # starter pack, ad TV, gem frog
+  - [0.84, 0.085, 1.00, 0.27]  # event / pass icons
+  - [0.00, 0.82, 0.21, 0.90]   # discount (%) button
+  - [0.83, 0.85, 1.00, 0.93]   # rocket boost
+  - [0.00, 0.89, 0.79, 1.00]   # bottom menu: camera, shop, x2 ad boost, outfits
