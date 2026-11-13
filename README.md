@@ -9,7 +9,7 @@ and a few templates cropped from the live game, and taps.
 | Task | How |
 |---|---|
 | **Unlock NEW items** | Taps anything wearing a white "NEW" sticker and presses its green coin button so the new item starts working. |
-| **Upgrade items** | Finds red/orange badges with a white up arrow on food and stations, opens the item, and presses the green buy button (in bursts of 3) until it turns grey. Closes the popup by tapping the item again. |
+| **Smart upgrade** (strategy) | **Red** arrow items first (they push the level bar), **orange** only after a full scroll sweep with no red. Among them it peeks into each popup, reads the star bar (light green = progress, dark green = what current coins add) and puts coins where the next ★ is closest — an affordable star wins outright, because stars multiply that item's income. Buys until the star pops, then re-evaluates. Logs `LEVEL BAR x% (+y%/min)` every minute. (`upgrade_items` = the old "upgrade everything" mode, off by default.) |
 | **Tap the egg** | The white/teal frog egg that wanders around is tapped to burst it for coin-carrying frogs. |
 | **Manage Eatery** | When the green up-arrow button (bottom right) shows its red "!", opens the menu, buys every affordable upgrade (top first), scrolls the list for more, and closes it with the orange X. |
 | **Collect coins** | Taps the big gold coins lying on the dining tables. |

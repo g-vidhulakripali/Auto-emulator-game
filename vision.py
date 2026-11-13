@@ -117,6 +117,24 @@ def find_upgrade_badges_by_arrow(img, ignore_regions=()):
     return dets
 
 
+def badge_color(img, d) -> str:
+    """'red' (upgrade pushes the level bar - do these first) or 'orange'."""
+    H, W = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    r = 0.36 * max(d.w, d.h)
+    red = orange = 0
+    for a in np.linspace(0, 2 * np.pi, 24, endpoint=False):
+        x, y = int(d.cx + r * np.cos(a)), int(d.cy + r * np.sin(a))
+        if 0 <= x < W and 0 <= y < H:
+            h, s, v = hsv[y, x]
+            if s > 140 and v > 140:
+                if h <= 9 or h >= 165:
+                    red += 1
+                elif 12 <= h <= 24:
+                    orange += 1
+    return "red" if red > orange else "orange"
+
+
 def find_alert_badges(img):
     """Red/orange '!' notification badges anywhere on screen (menus, offers, events).
     The bot must NEVER tap these; Bot.tap() refuses any tap that lands near one."""
@@ -169,7 +187,7 @@ def find_new_items(img, ignore_regions=()):
     H, W = img.shape[:2]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     white = _hsv_mask(hsv, [((0, 0, 225), (180, 50, 255))])
-    teal = _hsv_mask(hsv, [((60, 90, 110), (100, 255, 255))])
+    teal = _hsv_mask(hsv, [((60, 90, 110), (110, 255, 255))])  # green-teal to teal-blue letters
     # the white disc alone (letters are just holes inside it); never OR in teal, or the
     # disc merges with the teal bottle it is printed on
     disc = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
@@ -183,7 +201,7 @@ def find_new_items(img, ignore_regions=()):
         cv2.circle(inner, (w // 2, h // 2), int(min(w, h) * 0.42), 255, -1)
         t = cv2.bitwise_and(t, inner)
         ys, xs = np.nonzero(t)
-        if len(ys) < 0.06 * w * h or len(ys) > 0.45 * w * h:
+        if len(ys) < 0.03 * w * h or len(ys) > 0.45 * w * h:
             continue
         middle = ((ys > 0.3 * h) & (ys < 0.72 * h)).mean()  # letters sit in a middle band
         span = (xs.max() - xs.min() + 1) / w                 # ...and run across the disc
@@ -226,6 +244,44 @@ def red_fraction(img, region):
     hsv = cv2.cvtColor(img[int(y1 * H):int(y2 * H), int(x1 * W):int(x2 * W)], cv2.COLOR_BGR2HSV)
     red = _hsv_mask(hsv, [((0, 140, 140), (8, 255, 255)), ((170, 140, 140), (180, 255, 255))])
     return float((red > 0).mean())
+
+
+def read_item_popup(img, title):
+    """Read an open item popup, positioned from its 'Level' title match.
+    Returns {'done': light-green share of the star bar (progress so far),
+             'gain': dark-green share (what the coins you have would add),
+             'stars': filled stars} or None if the bar can't be read."""
+    H, W = img.shape[:2]
+    y = title.y + 135                     # star-progress bar row
+    x0, x1 = max(0, title.cx - 102), min(W, title.cx + 133)
+    if y + 2 >= H or x1 - x0 < 100:
+        return None
+    hsv = cv2.cvtColor(img[y - 1:y + 2, x0:x1], cv2.COLOR_BGR2HSV)
+    h, s, v = (np.median(hsv[..., i], axis=0) for i in range(3))
+    green = (h >= 40) & (h <= 65) & (s > 100)
+    light = green & (v >= 185)
+    dark = green & (v >= 120) & (v < 185)
+    track = (h >= 165) & (s < 60) & (v > 200)
+    total = light.sum() + dark.sum() + track.sum()
+    if total < 60:
+        return None
+    sy = title.y + 88                     # star row
+    srow = cv2.cvtColor(img[sy - 6:sy + 7, max(0, title.cx - 110):min(W, title.cx + 150)],
+                        cv2.COLOR_BGR2HSV)
+    filled = _hsv_mask(srow, [((8, 150, 200), (30, 255, 255))])
+    n, _, st, _ = cv2.connectedComponentsWithStats(filled)
+    stars = sum(1 for i in range(1, n) if st[i, cv2.CC_STAT_AREA] > 30)
+    return {"done": light.sum() / total, "gain": dark.sum() / total, "stars": stars}
+
+
+def level_bar(img):
+    """Fill of the orange level-progress bar above the bottom menu (0..1)."""
+    H, W = img.shape[:2]
+    y = int(0.9135 * H)
+    hsv = cv2.cvtColor(img[y - 1:y + 2, int(0.035 * W):int(0.835 * W)], cv2.COLOR_BGR2HSV)
+    h, s = np.median(hsv[..., 0], axis=0), np.median(hsv[..., 1], axis=0)
+    orange = (h >= 8) & (h <= 24) & (s > 150)
+    return float(orange.mean())
 
 
 def find_template(img, folder, threshold=0.8):

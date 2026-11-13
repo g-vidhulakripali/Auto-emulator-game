@@ -30,8 +30,9 @@ class Bot:
         self.ignore_taps = [tuple(r) for r in cfg.get("no_tap_regions", [])]
         self.last_img, self._alerts = None, None
         self.dev = Device(cfg["adb_path"], cfg["serials"])
-        self.tasks = [TASKS[name](self, tcfg) for name, tcfg in cfg["tasks"].items()
-                      if tcfg.get("enabled", True)]
+        self.task_by_name = {name: TASKS[name](self, tcfg) for name, tcfg in cfg["tasks"].items()
+                             if tcfg.get("enabled", True)}
+        self.tasks = list(self.task_by_name.values())
         self.shape = None
 
     # --- primitives -------------------------------------------------------
@@ -47,6 +48,10 @@ class Bot:
         if img is None:
             return False
         H, W = img.shape[:2]
+        # the ONE exception: the Manage Eatery button may be pressed even with its '!'
+        for ax, ay, ar in self.cfg.get("allow_tap_points", []):
+            if ((x / W - ax) ** 2 + (y / H - ay) ** 2) ** 0.5 <= ar:
+                return True
         if any(x1 <= x / W <= x2 and y1 <= y / H <= y2 for x1, y1, x2, y2 in self.ignore_taps):
             log.warning("refused tap at (%d,%d): inside a no-touch HUD region", x, y)
             return False
@@ -139,16 +144,25 @@ class Bot:
             self.wait(0.5)
 
     def close_stale_popup(self, img) -> bool:
-        """An item popup left open (e.g. it opened late). Its item sits straight below
-        the 'Level' title, so tapping there toggles it closed."""
-        t = vision.find_template(img, ROOT / "templates" / "popup")
-        if t is None:
+        """An item popup left open (it opened late, or its 'Level' title is hidden under
+        the coin bar). Recognised by its green COIN button outside Manage Eatery. Closed by
+        tapping its item (right below the popup), or empty floor if that spot is off-limits
+        - both close item popups."""
+        if self.eatery_title(img) is not None:
             return False
-        H = img.shape[0]
-        x, y = t.cx + 0.025 * img.shape[1], t.cy + self.cfg.get("popup_item_dy", 0.245) * H
+        btns = vision.find_green_buttons(img)
+        if not btns:
+            return False
+        H, W = img.shape[:2]
+        b = btns[0]
+        x, y = b.cx, b.y + b.h + 0.042 * H
         log.info("closing a leftover item popup")
-        if y < H and self.tap(x, y):
-            self.wait(0.5)
+        if not (y < H and self.tap(x, y)):
+            fx, fy = self.cfg.get("floor_spot", [0.67, 0.5])
+            if abs(fy * H - b.cy) < 0.2 * H:   # keep the floor tap away from the popup
+                fy = 0.75 if b.cy < 0.5 * H else 0.3
+            self.tap(fx * W, fy * H)
+        self.wait(0.5)
         return True
 
     def close_with_x(self):
@@ -163,9 +177,18 @@ class Bot:
         log.info("tasks: %s", [type(t).__name__ for t in self.tasks])
         interval = self.cfg.get("loop_interval", 0.5)
         n = 0
+        start, first_bar, last_report = time.time(), None, 0.0
         while True:
             try:
                 img = self.screenshot()
+                if time.time() - last_report >= self.cfg.get("report_seconds", 60):
+                    bar = vision.level_bar(img)
+                    first_bar = bar if first_bar is None else first_bar
+                    mins = (time.time() - start) / 60
+                    rate = (bar - first_bar) / mins if mins > 0.5 else 0
+                    log.info("LEVEL BAR %.1f%%  (+%.1f%% in %.0f min, %.2f%%/min)",
+                             bar * 100, (bar - first_bar) * 100, mins, rate * 100)
+                    last_report = time.time()
                 if self.guard(img) or self.close_stale_popup(img):
                     continue
                 if self.debug and n % 10 == 0:

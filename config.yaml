@@ -12,33 +12,62 @@ buy_burst: 3            # presses of a buy button per screenshot check (faster l
 # tap near a red/orange '!' badge or inside no_tap_regions is refused.
 
 tasks:
-  # order = priority within each cycle
-  unlock_new:           # item with a NEW sticker -> open it -> press green unlock button
-    enabled: true
-    every_seconds: 3
-    max_per_cycle: 2
-    max_clicks: 3
-    popup_wait: 0.8
-  upgrade_items:       # red badge with up arrow on a food -> open it -> buy levels
-    enabled: true
-    every_seconds: 2
-    max_per_cycle: 4
-    max_clicks_per_item: 12
-    popup_wait: 0.5
-    tap_offset: [1.2, 1.3]   # item centre relative to badge (in badge sizes)
-  tap_egg:              # white/teal frog egg wandering around -> tap to burst it for coins
-    enabled: true
-    every_seconds: 1
-    dir: templates/egg
-    threshold: 0.75
-  manage_eatery:        # green up-arrow button bottom-right -> buy eatery upgrades
-    enabled: true
-    every_seconds: 5          # how often to check the button for its red '!'
+  # order = priority within each cycle (your list):
+  #   1 green arrow (Manage Eatery)  2 NEW + frog egg  3 red arrows  4 orange (evaluated)
+  manage_eatery:        # 1: green up-arrow button bottom-right (the one allowed '!') ->
+    enabled: true       # eatery multipliers (x10 price, faster cooking, +workers)
+    every_seconds: 3          # how often to check the button for its red '!'
     only_when_badged: true
     badge_region: [0.78, 0.91, 0.85, 0.96]
     button_pos: [0.88, 0.96]
     popup_wait: 0.8
     max_buys: 15
+  tap_egg:              # 2: white/teal frog egg wandering around -> tap to burst it
+    enabled: true
+    every_seconds: 1
+    dir: templates/egg
+    threshold: 0.75
+  unlock_new:           # 2: NEW sticker -> one tap unlocks the item (template templates/new)
+    enabled: true
+    every_seconds: 1
+    threshold: 0.75
+    max_per_cycle: 2
+    max_clicks: 3
+    popup_wait: 0.8
+  planner:              # 3+4: WHOLE-RESTAURANT plan. Scans top->bottom recording every red and
+    enabled: true       # orange arrow (+ OCR payback). Any red anywhere -> best red (shortest
+    every_seconds: 1    # payback); no red at all -> best orange. Scrolls there, buys, repeats.
+    rescan_seconds: 90
+    max_views: 8
+    quick_tasks: [manage_eatery, tap_egg, unlock_new, collect_coins]  # done on every view
+    tap_offset: [1.2, 1.3]
+    popup_wait: 0.5
+    max_clicks: 45
+    burst: 3
+    min_payback: 1.0
+  smart_upgrade:        # (older per-screen version of the strategy; planner replaces it)
+    enabled: false
+    max_red_per_cycle: 4
+    red_sweep_seconds: 25   # no red seen for one scroll sweep -> oranges allowed
+    every_seconds: 1
+    min_y: 0.12
+    tap_offset: [1.2, 1.3]
+    popup_wait: 0.5
+    max_survey: 6       # items peeked per view
+    max_buy_items: 3    # items bought per view, best first
+    max_clicks: 45
+    burst: 3
+    save_factor: 2.0    # better item elsewhere (2x faster payback) -> keep coins for it
+    memory_seconds: 120 # how long surveyed paybacks from other views are remembered
+    save_max_seconds: 60 # never save coins for one item longer than this
+    min_payback: 1.0    # shorter = OCR misread, ignored
+  upgrade_items:        # simple mode (old): upgrade every badge in view. Off: smart_upgrade
+    enabled: false      # replaces it.
+    every_seconds: 2
+    max_per_cycle: 4
+    max_clicks_per_item: 12
+    popup_wait: 0.5
+    tap_offset: [1.2, 1.3]   # item centre relative to badge (in badge sizes)
   collect_coins:        # big gold coins on the dining tables -> tap for extra money
     enabled: true
     every_seconds: 1
@@ -48,8 +77,8 @@ tasks:
     every_seconds: 1
     dir: templates/tap
     threshold: 0.85
-  scroll:               # pan through the restaurant (keep last)
-    enabled: true
+  scroll:               # free panning (off: the planner does the scrolling)
+    enabled: false
     every_seconds: 3    # time spent on each view before moving on
     step: 0.45          # drag length, fraction of screen height (top->bottom in ~3 views)
     x: 0.5
@@ -70,6 +99,10 @@ ignore_regions:
   - [0.00, 0.82, 0.21, 0.90]   # discount (%) button
   - [0.83, 0.85, 1.00, 0.93]   # rocket boost
   - [0.00, 0.89, 1.00, 1.00]   # bottom menu bar
+
+# The ONLY '!'-carrying button the bot may press: Manage Eatery (x, y, radius).
+allow_tap_points:
+  - [0.88, 0.96, 0.04]
 
 # Hard tap block: every HUD button EXCEPT the Manage Eatery button (bottom right).
 no_tap_regions:
