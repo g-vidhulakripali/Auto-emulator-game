@@ -308,15 +308,29 @@ def find_close_button(img):
     orange = _hsv_mask(hsv, [((5, 110, 190), (20, 255, 255))])
     orange = cv2.morphologyEx(orange, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     white = _hsv_mask(hsv, [((0, 0, 210), (180, 60, 255))])
+    global _X_TPL
+    if _X_TPL is None:
+        _X_TPL = cv2.imread(str(Path(__file__).parent / "templates" / "close" / "x_button.png"))
     best = None
-    for x, y, w, h in _blobs(orange, 0.04 * W, 0.13 * W, min_circ=0.6, aspect=(0.75, 1.33)):
+    for x, y, w, h in _blobs(orange, 0.052 * W, 0.13 * W, min_circ=0.6, aspect=(0.75, 1.33)):
         d = Det("close", x, y, w, h)
         if d.cx < 0.6 * W or d.cy > 0.7 * H:
             continue
         ratio = (white[y:y + h, x:x + w] > 0).mean()
-        if 0.08 <= ratio <= 0.5 and (best is None or d.cy < best.cy):
+        if not (0.08 <= ratio <= 0.5):
+            continue
+        # must actually look like the X button (a waffle in an order bubble is also an
+        # orange square with white on it)
+        if _X_TPL is not None:
+            crop = cv2.resize(img[y:y + h, x:x + w], (_X_TPL.shape[1], _X_TPL.shape[0]))
+            if cv2.matchTemplate(crop, _X_TPL, cv2.TM_CCOEFF_NORMED).max() < 0.75:
+                continue                     # real X buttons score ~1.0
+        if best is None or d.cy < best.cy:
             best = d
     return best
+
+
+_X_TPL = None
 
 
 def find_coins(img, ignore_regions=(), min_d=0.032):

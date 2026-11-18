@@ -42,12 +42,19 @@ class UnlockNew(Task):
             if not self.bot.tap(it.cx, it.cy):
                 continue
             self.bot.wait(self.cfg.get("popup_wait", 0.8))
-            # NEW items open the same 'Level' popup (or a window with an X)
-            ok = lambda im: self.bot.is_item_popup(im) or vision.find_close_button(im) is not None
-            bought = self.bot.buy_until_grey(self.cfg.get("max_clicks", 3), screen_ok=ok)
-            log.info("  unlocked" if bought else "  nothing to buy (not enough coins yet?)")
-            self.bot.close_item_popup(it.cx, it.cy)
-            self.bot.close_with_x()
+            shot = self.bot.screenshot()
+            # a) 'New <dish>' popup with a coin button right above it -> build it
+            if self.bot.build_if_unlock(shot, it.cx, it.cy):
+                continue
+            # b) a normal 'Level' popup -> buy
+            if self.bot.is_item_popup(shot):
+                bought = self.bot.buy_until_grey(self.cfg.get("max_clicks", 3),
+                                                 screen_ok=self.bot.is_item_popup)
+                log.info("  unlocked" if bought else "  nothing to buy (not enough coins yet)")
+                self.bot.close_item_popup(it.cx, it.cy)
+                continue
+            # c) nothing opened: the tap itself unlocked it (as in the first world)
+            log.info("  unlocked by the tap")
         return bool(items)
 
 
@@ -109,7 +116,10 @@ class ProfitUpgrade(Task):
         self.bot.wait(self.cfg.get("popup_wait", 0.5))
         img = self.bot.screenshot()
         t = vision.find_template(img, ROOT_TEMPLATES / "popup")
-        return (img, t) if t is not None else None
+        if t is None:
+            self.bot.build_if_unlock(img, ix, iy)
+            return None
+        return img, t
 
     def _read(self, img, t):
         info = ocr.read_popup(img, t)

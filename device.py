@@ -1,5 +1,8 @@
 """Thin ADB wrapper: screenshots, taps and key presses for an Android emulator."""
+import logging
 import subprocess
+import threading
+import time
 
 import cv2
 import numpy as np
@@ -10,6 +13,9 @@ class Device:
         self.adb = adb_path
         self.candidates = serials
         self.serial = None
+        self._shot_lock = threading.Lock()
+        self._last, self._last_t = None, 0.0
+        self.shot_timeout = 6      # a normal capture takes ~0.4 s
 
     def _adb(self, *args, timeout=20, text=False):
         return subprocess.run([self.adb, *args], capture_output=True, timeout=timeout, text=text)
@@ -40,17 +46,34 @@ class Device:
             raise RuntimeError(f"screencap failed: {r.stderr[:200]!r}")
         return img
 
-    def screenshot_raw(self) -> np.ndarray:
-        """Faster: raw RGBA frame (no PNG encoding on the device)."""
-        data = self._run("exec-out", "screencap").stdout
-        if len(data) < 16:
-            return self.screenshot()
-        w, h = (int(v) for v in np.frombuffer(data[:8], np.uint32))
-        hdr = len(data) - w * h * 4
-        if hdr not in (12, 16):
-            return self.screenshot()
-        rgba = np.frombuffer(data[hdr:], np.uint8).reshape(h, w, 4)
-        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+    def screenshot_raw(self, max_age: float = 0.0) -> np.ndarray:
+        """Raw RGBA frame (no PNG encoding on the device).
+        Only ONE capture runs at a time (main loop + banner watcher share the device), and
+        a caller that accepts a slightly older frame (max_age seconds) gets the last one
+        instead of a new 5.8 MB capture - too many parallel captures made ADB stall."""
+        with self._shot_lock:
+            if max_age and self._last is not None and time.time() - self._last_t <= max_age:
+                return self._last
+            try:
+                data = self._run("exec-out", "screencap", timeout=self.shot_timeout).stdout
+            except subprocess.TimeoutExpired:
+                # raw 'adb exec-out screencap' occasionally hangs on Windows: retry ONCE,
+                # a second hang propagates and stops the bot
+                logging.getLogger("frogbot").warning(
+                    "screenshot hung for %ss - retrying once", self.shot_timeout)
+                data = self._run("exec-out", "screencap", timeout=self.shot_timeout).stdout
+            if len(data) < 16:
+                img = self.screenshot()
+            else:
+                w, h = (int(v) for v in np.frombuffer(data[:8], np.uint32))
+                hdr = len(data) - w * h * 4
+                if hdr not in (12, 16):
+                    img = self.screenshot()
+                else:
+                    rgba = np.frombuffer(data[hdr:], np.uint8).reshape(h, w, 4)
+                    img = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+            self._last, self._last_t = img, time.time()
+            return img
 
     def tap(self, x: float, y: float):
         self._run("shell", "input", "tap", str(int(x)), str(int(y)))

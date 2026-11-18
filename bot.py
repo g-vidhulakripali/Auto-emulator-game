@@ -83,11 +83,11 @@ class Bot:
         video_noted = False
         while True:
             try:
-                img = self.dev.screenshot_raw()
+                img = self.dev.screenshot_raw(max_age=0.45)   # reuse the main loop's frame
                 H, W = img.shape[:2]
                 if vision.banner_gold(img) < self.cfg.get("banner_guard_gold", 0.20):
                     self.banner_block, video_noted = None, False
-                    time.sleep(self.cfg.get("banner_poll", 0.3))
+                    time.sleep(self.cfg.get("banner_poll", 0.5))
                     continue
                 self.banner_block = vision.BANNER_STRIP      # hands off until proven FREE
                 oy, ox = int(y1 * H) - 40, int(x1 * W) - 40
@@ -114,7 +114,7 @@ class Bot:
                 log.debug("banner watcher error", exc_info=True)
                 self.fatal = e
                 return
-            time.sleep(self.cfg.get("banner_poll", 0.3))
+            time.sleep(self.cfg.get("banner_poll", 0.5))
 
     def _claim_free(self, img, x, y, why):
         if self.ad_showing():
@@ -145,7 +145,7 @@ class Bot:
         # the bottom menu, with a 'Play now' button in the same spot)
         for ax, ay, ar in self.cfg.get("allow_tap_points", []):
             if ((x / W - ax) ** 2 + (y / H - ay) ** 2) ** 0.5 <= ar:
-                if self.eatery_button_visible(self.dev.screenshot_raw()):
+                if self.eatery_button_visible(self.dev.screenshot_raw(max_age=0.3)):
                     return True
                 log.warning("refused tap at (%d,%d): Manage Eatery button not visible "
                             "(ad banner over the menu?)", x, y)
@@ -159,7 +159,7 @@ class Bot:
         sx1, sy1, sx2, sy2 = vision.BANNER_STRIP
         if sx1 - 0.02 <= x / W <= sx2 and sy1 - 0.02 <= y / H <= sy2 + 0.02:
             if not getattr(self, "free_ok", False):
-                fresh = self.dev.screenshot_raw()
+                fresh = self.dev.screenshot_raw(max_age=0.25)
                 if vision.banner_gold(fresh) >= self.cfg.get("banner_guard_gold", 0.20):
                     log.warning("refused tap at (%d,%d): reward banner area (not verified FREE)", x, y)
                     return False
@@ -358,6 +358,24 @@ class Bot:
             return True
         return False
 
+    def build_if_unlock(self, img, ix, iy) -> bool:
+        """'New <dish>' popup (empty station slot or NEW item): no 'Level' title, just a
+        coin button right above the tapped spot -> press it to build/unlock."""
+        H, W = img.shape[:2]
+        if vision.find_template(img, ROOT / "templates" / "popup") is not None:
+            return False
+        btns = [b for b in vision.find_green_buttons(img)
+                if b.cy < iy and iy - b.cy < 0.25 * H and abs(b.cx - ix) < 0.3 * W]
+        if not btns:
+            return False
+        b = btns[-1]                               # the one closest above the tapped spot
+        log.info("  'New' popup -> building it (coin button at %d,%d)", b.cx, b.cy)
+        if self.tap(b.cx, b.cy):
+            time.sleep(1.0)
+        if vision.find_green_buttons(self.screenshot()):
+            self.close_stale_popup(self.last_img)
+        return True
+
     def clear_overlays(self, img) -> bool:
         """Leftover windows must be closed before the bot looks at the restaurant, or it
         mistakes their contents for dishes/coins (e.g. a Manage Eatery list left open)."""
@@ -410,7 +428,8 @@ class Bot:
                 img = self.screenshot()
                 if time.time() - last_report >= self.cfg.get("report_seconds", 60):
                     bar = vision.level_bar(img)
-                    first_bar = bar if first_bar is None else first_bar
+                    if first_bar is None or bar < first_bar - 0.2:   # new location: bar restarts
+                        first_bar, start = bar, time.time()
                     mins = (time.time() - start) / 60
                     rate = (bar - first_bar) / mins if mins > 0.5 else 0
                     log.info("LEVEL BAR %.1f%%  (+%.1f%% in %.0f min, %.2f%%/min)  bot memory %d MB",
